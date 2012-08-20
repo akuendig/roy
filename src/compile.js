@@ -8,6 +8,7 @@ var typecheck = require('./typeinference').typecheck,
     parser = require('./parser').parser,
     typeparser = require('./typeparser').parser,
     lexer = require('./lexer'),
+    argv = require("optimist").argv,
     _ = require('underscore');
 
 // Assigning the nodes to `parser.yy` allows the grammar to access the nodes from
@@ -551,7 +552,7 @@ var nodeRepl = function(opts) {
 
     // Include the standard library
     var fs = require('fs');
-    var prelude = fs.readFileSync(path.dirname(__dirname) + '/lib/prelude.roy', 'utf8');
+    var prelude = fs.readFileSync(path.join(__dirname, '/lib/prelude.roy', 'utf8'));
     vm.runInNewContext(compile(prelude, env, {}, {nodejs: true}).output, sandbox, 'eval');
     repl.setPrompt('roy> ');
     repl.on('close', function() {
@@ -701,81 +702,101 @@ var importModule = function(name, env, opts) {
 };
 
 var main = function() {
-    var argv = process.argv.slice(2);
-
-    // Meta-commands configuration
-    var opts = {
-        colorConsole: false
-    };
+    var optimist = require('optimist');
+    var argv = optimist
+        .options({
+            'v': {
+                alias: 'version',
+                boolean: true,
+                describe: 'show current version'
+            },
+            'h': {
+                alias: 'help',
+                boolean: true,
+                describe: 'show this help'
+            },
+            'p': {
+                alias: 'prelude',
+                boolean: true,
+                'default': true,
+                describe: 'include prelude standart library'
+            },
+            'r': {
+                alias: 'run',
+                boolean: true,
+                describe: 'run the compiled file instead of saving it'
+            },
+            'b': {
+                alias: 'browser',
+                boolean: true,
+                describe: 'wrapp compiled code into an immediately executing anonymouse function'
+            },
+            'c': {
+                alias: 'color',
+                boolean: true,
+                describe: 'enable colored repl output'
+            },
+            'stdio': {
+                boolean: true,
+                describe: 'take input from stdin and write compiled code to stdout'
+            }
+        })
+        .argv;
 
     // Roy package information
     var fs = require('fs'),
         path = require('path');
-    var info = JSON.parse(fs.readFileSync(path.dirname(__dirname) + '/package.json', 'utf8'));
+    var info = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
 
-    if(process.argv.length < 3) {
+    var run = argv.r;
+    var files = argv._;
+    var includePrelude = argv.p;
+    var browserModules = argv.b;
+
+    if (argv.v) {
         console.log("Roy: " + info.description);
-        console.log(info.author);
-        console.log(":? for help");
-        nodeRepl(opts);
+        console.log(info.version);
         return;
     }
 
-    var source;
-    var vm;
-    var browserModules = false;
-    var run = false;
-    var includePrelude = true;
-    switch(argv[0]) {
-    case "-v":
-    case "--version":
-        console.log("Roy: " + info.description);
-        console.log(info.version);
-        process.exit();
-        break;
-    case "--help":
-    case "-h":
-        console.log("Roy: " + info.description + "\n");
-        console.log("-v        : show current version");
-        console.log("-r [file] : run Roy-code without JavaScript output");
-        console.log("-p        : run without prelude (standard library)");
-        console.log("-c        : colorful REPL mode");
-        console.log("-h        : show this help");
+    if (argv.h) {
+        optimist.showHelp();
         return;
-    case "--stdio":
-        source = '';
-        process.stdin.resume();
+    }
+
+    if (argv.stdio) {
+        var source = '';
+
         process.stdin.setEncoding('utf8');
         process.stdin.on('data', function(data) {
             source += data;
         });
         process.stdin.on('end', function() {
-            console.log(compile(source).output);
+            var lines = compile(source).output;
+
+            console.log(lines);
         });
+        
+        process.stdin.resume();
+
         return;
-    case "-p":
-        includePrelude = false;
-    case "-r":
-        vm = require('vm');
-        run = true;
-        argv.shift();
-        break;
-    case "-b":
-    case "--browser":
-        browserModules = true;
-        argv.shift();
-        break;
-    case "-c":
-    case "--color":
-        opts.colorConsole = true;
-        nodeRepl(opts);
+    }
+
+    if (files.length === 0) {
+        console.log("Roy: " + info.description);
+        console.log(info.author);
+        console.log(":? for help");
+
+        nodeRepl({
+            colorConsole: argv.c
+        });
+
         return;
     }
 
     var extensions = /\.l?roy$/;
     var literateExtension = /\.lroy$/;
 
-    var exported;
     var env = {};
     var aliases = {};
     var sandbox = getSandbox();
@@ -783,15 +804,17 @@ var main = function() {
     if(run) {
         // Include the standard library
         if(includePrelude) {
-            argv.unshift(path.dirname(__dirname) + '/lib/prelude.roy');
+            files.unshift(path.join(__dirname, '/lib/prelude.roy'));
         }
     } else {
         var modules = [];
-        if(!argv.length || argv[0] != 'lib/prelude.roy') {
-            modules.push(path.dirname(__dirname) + '/lib/prelude');
+
+        if(includePrelude && (files.length === 0 || !_.contains(files, 'lib/prelude.roy'))) {
+            modules.unshift(path.join(__dirname, '/lib/prelude'));
         }
+
         _.each(modules, function(module) {
-            var moduleTypes = loadModule(module, {filename: '.'});
+            var moduleTypes = loadModule(module, {filename: ''});
             _.each(moduleTypes.env, function(v, k) {
                 env[k] = new types.Variable();
                 env[k] = nodeToType(v, env, aliases);
@@ -799,7 +822,7 @@ var main = function() {
         });
     }
 
-    _.each(argv, function(filename) {
+    _.each(files, function(filename) {
         // Read the file content.
         var source = getFileContents(filename);
 
@@ -810,7 +833,7 @@ var main = function() {
             console.assert(filename.match(extensions), 'Filename must end with ".roy" or ".lroy"');
         }
 
-        exported = {};
+        var exported = {};
         var outputPath = filename.replace(extensions, '.js');
         var SourceMapGenerator = require('source-map').SourceMapGenerator;
         var sourceMap = new SourceMapGenerator({file: path.basename(outputPath)});
@@ -823,6 +846,7 @@ var main = function() {
             sourceMap: sourceMap
         });
         if(run) {
+            var vm = require('vm');
             // Execute the JavaScript output.
             output = vm.runInNewContext(compiled.output, sandbox, 'eval');
         } else {
